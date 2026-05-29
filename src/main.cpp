@@ -3,6 +3,9 @@
 #include <PubSubClient.h>
 #include <WiFiManager.h>
 #include <Preferences.h>
+#include <ArduinoJson.h>
+
+#define LED_PIN 8
 
 namespace Config {
     constexpr gpio_num_t PIN_POWER  = GPIO_NUM_2;
@@ -12,7 +15,9 @@ namespace Config {
     constexpr const char* DEFAULT_MQTT_PORT = "1883";
     constexpr const char* HOME_MQTT_TOPIC_PREFIX = "home/water/";
 
-    constexpr uint64_t HEARTBEAT_US = 24ULL * 60ULL * 60ULL * 1000000ULL; // 24 hours in microseconds
+    // constexpr uint64_t HEARTBEAT_US = 24ULL * 60ULL * 60ULL * 1000000ULL; // 24 hours in microseconds
+    // wake up every minute for testing purposes, change to the above for production
+    constexpr uint64_t HEARTBEAT_US = 60ULL * 1000000ULL; // 1 minute in microseconds
 
     constexpr uint8_t WIFI_MAX_CONN_RETRIES = 20;
 
@@ -24,6 +29,25 @@ PubSubClient mqttClient(espClient);
 // -------------------------------------------------------------------------
 // HELPERS
 // -------------------------------------------------------------------------
+
+String getMsgPayload(bool leak) {
+    JsonDocument doc;
+
+    doc["state"] = leak ? "leak" : "dry";
+
+    doc["signal"] = WiFi.RSSI();
+
+    float currentBatteryVoltage = 3.25;
+    doc["battery"] = currentBatteryVoltage;
+
+    char mqttPayload[128];
+    serializeJson(doc, mqttPayload);
+
+    Serial.print("[INFO] Publishing MQTT message: ");
+    Serial.println(mqttPayload);
+    return String(mqttPayload);
+}
+
 
 void sendMQTTMessage(const String& mqttServer, const String& mqttPort, const String& topicSuffix, const String& payload) {
 
@@ -57,6 +81,7 @@ void resetAndRestart() {
 
 void connectAndSendMQTT(const String& mqttServer, const String& mqttPort, const String& topicSuffix, const String& payload) {
 
+    digitalWrite(LED_PIN, LOW);
     WiFi.mode(WIFI_STA);
     WiFi.begin();
 
@@ -79,11 +104,25 @@ void connectAndSendMQTT(const String& mqttServer, const String& mqttPort, const 
     sendMQTTMessage(mqttServer, mqttPort, topicSuffix, payload);
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
+    digitalWrite(LED_PIN, HIGH);
 }
 
 
+
+static void initialLedBlinking() {
+
+    pinMode(LED_PIN, OUTPUT);
+    for(int i = 0; i < 5; i++) {
+            digitalWrite(LED_PIN, LOW);
+            delay(100);
+            digitalWrite(LED_PIN, HIGH);
+            delay(100);
+        }
+}
+
 void handleFirstSetup() {
 
+    digitalWrite(LED_PIN, LOW);
     String mqttServer;
     String mqttPort;
     Preferences prefs;
@@ -133,6 +172,7 @@ void handleFirstSetup() {
     topicSuffix.toLowerCase();
     prefs.putString("topic_suffix", topicSuffix);
     prefs.end();
+    digitalWrite(LED_PIN, HIGH);
     return;
 }
 
@@ -140,10 +180,16 @@ void setup() {
 
     Preferences prefs;
 
-    Serial.begin(115200);
-    delay(3000);
-    Serial.println("\n\n[INFO] Starting up...");
+    initialLedBlinking();
 
+    unsigned long startTime = millis();
+    while (!Serial && millis() - startTime < 20000) {
+        delay(10);
+    }
+
+    Serial.println("\n\n---------------------------------");
+    Serial.println("[INFO] Starting up...");
+    Serial.println("---------------------------------\n");
     pinMode(Config::PIN_POWER, OUTPUT);
     digitalWrite(Config::PIN_POWER, HIGH);
     pinMode(Config::PIN_SENSOR, INPUT_PULLDOWN);
@@ -165,11 +211,11 @@ void setup() {
     }
     else if (wakeup_reason == ESP_SLEEP_WAKEUP_TIMER) {
         Serial.println("\n[INFO] Routine-Check");
-        connectAndSendMQTT(mqttServer, mqttPort, topicSuffix, String("HEARTBEAT"));
+        connectAndSendMQTT(mqttServer, mqttPort, topicSuffix, getMsgPayload(false));
     }
     else if (wakeup_reason == ESP_SLEEP_WAKEUP_GPIO) {
         Serial.println("\n[ERROR] Water detected!");
-        connectAndSendMQTT(mqttServer, mqttPort, topicSuffix, String("ALARM"));
+        connectAndSendMQTT(mqttServer, mqttPort, topicSuffix, getMsgPayload(true));
     }
     else if (wakeup_reason == ESP_SLEEP_WAKEUP_UNDEFINED) {
         Serial.println("\n[INFO] Cold boot. Skipping WiFi...");
